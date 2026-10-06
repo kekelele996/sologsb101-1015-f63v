@@ -13,8 +13,26 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { HISTORY_KIND_LABEL, useTreeHistory } from '@/hooks/useTreeHistory'
 import { useTreeStore } from '@/stores/treeStore'
 import { db } from '@/utils/db'
-import { SITE_NOTE_OPTIONS, type SiteNote, type Survey, type SurveyDraft } from '@/types/survey'
-import { LEAN_DANGER_DEG, LEAN_WATCH_DEG, annualGrowth, hollowRisk, leanLevel, siteAdvice } from '@/utils/dimension'
+import {
+  defaultRemeasureDraft,
+  hasRemeasure,
+  SITE_NOTE_OPTIONS,
+  type RemeasureDraft,
+  type SiteNote,
+  type Survey,
+  type SurveyDraft,
+} from '@/types/survey'
+import {
+  effectiveSurvey,
+  LEAN_DANGER_DEG,
+  LEAN_WATCH_DEG,
+  annualGrowth,
+  hollowRisk,
+  leanLevel,
+  siteAdvice,
+  type EffectiveSurvey,
+} from '@/utils/dimension'
+import { today } from '@/utils/id'
 
 const route = useRoute()
 const router = useRouter()
@@ -51,7 +69,48 @@ const rules: FormRules<SurveyDraft> = {
   siteNote: [{ required: true, message: '请选择立地状况', trigger: 'change' }],
 }
 
-/** 该株古树的检查记录，按日期升序 */
+/* ------------------------------ 补记复测 ------------------------------ */
+
+const remeasureDialogVisible = ref(false)
+const remeasureSubmitting = ref(false)
+const remeasureFormRef = ref<FormInstance>()
+/** 当前补记复测的目标检查记录 */
+const remeasureTarget = ref<Survey | null>(null)
+
+const remeasureForm = reactive<RemeasureDraft>({
+  remeasureDate: '',
+  remeasureHeightM: 12,
+  remeasureDbhCm: 60,
+  remeasureCrownM: 8,
+  remeasureLeanDeg: 2,
+  remeasureHollowCount: 0,
+})
+
+const remeasureRules = computed<FormRules<RemeasureDraft>>(() => ({
+  remeasureDate: [
+    { required: true, message: '请选择复测日期', trigger: 'change' },
+    {
+      validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+        if (remeasureTarget.value === null) return callback()
+        if (value <= remeasureTarget.value.date) {
+          return callback(new Error(`复测日期必须晚于检查日期 ${remeasureTarget.value.date}`))
+        }
+        if (value > today()) {
+          return callback(new Error('复测日期不能晚于今天'))
+        }
+        callback()
+      },
+      trigger: 'change',
+    },
+  ],
+  remeasureHeightM: [{ required: true, message: '请填写复测树高', trigger: 'blur' }],
+  remeasureDbhCm: [{ required: true, message: '请填写复测胸径', trigger: 'blur' }],
+  remeasureCrownM: [{ required: true, message: '请填写复测冠幅', trigger: 'blur' }],
+  remeasureLeanDeg: [{ required: true, message: '请填写复测倾斜度', trigger: 'blur' }],
+  remeasureHollowCount: [{ required: true, message: '请填写复测空洞数', trigger: 'blur' }],
+}))
+
+/** 该株古树的检查记录，按检查日期升序（用于表格展示与操作） */
 const surveys = computed<Survey[]>(() =>
   rows.value
     .filter((row) => row.treeId === treeId.value)
@@ -60,6 +119,17 @@ const surveys = computed<Survey[]>(() =>
 
 /** 表格展示顺序：日期倒序 */
 const displayRows = computed<Survey[]>(() => [...surveys.value].reverse())
+
+/** 取检查记录的有效值（已复测取复测值） */
+function eff(row: Survey): EffectiveSurvey {
+  return effectiveSurvey(row)
+}
+
+/** 取上一次检查的有效值（首次检查返回 null） */
+function prevEff(row: Survey): EffectiveSurvey | null {
+  const prev = previousOf(row)
+  return prev === null ? null : eff(prev)
+}
 
 function previousOf(row: Survey): Survey | null {
   const index = surveys.value.findIndex((item) => item.id === row.id)
@@ -73,14 +143,19 @@ function deltaText(previous: number | null, current: number, unit: string): stri
   return `${delta > 0 ? '+' : ''}${delta} ${unit}`
 }
 
-const latest = computed<Survey | null>(() =>
-  surveys.value.length === 0 ? null : surveys.value[surveys.value.length - 1]
+/** 全部检查的有效值，按生效日期升序（用于年生长量与风险判定） */
+const effectiveSurveys = computed<EffectiveSurvey[]>(() =>
+  surveys.value.map((row) => effectiveSurvey(row)).sort((a, b) => a.date.localeCompare(b.date))
+)
+
+const latest = computed<EffectiveSurvey | null>(() =>
+  effectiveSurveys.value.length === 0 ? null : effectiveSurveys.value[effectiveSurveys.value.length - 1]
 )
 
 const annual = computed(() => {
-  if (surveys.value.length < 2) return { height: 0, dbh: 0, crown: 0 }
-  const current = surveys.value[surveys.value.length - 1]
-  const previous = surveys.value[surveys.value.length - 2]
+  if (effectiveSurveys.value.length < 2) return { height: 0, dbh: 0, crown: 0 }
+  const current = effectiveSurveys.value[effectiveSurveys.value.length - 1]
+  const previous = effectiveSurveys.value[effectiveSurveys.value.length - 2]
   return {
     height: annualGrowth(previous.heightM, current.heightM, previous.date, current.date),
     dbh: annualGrowth(previous.dbhCm, current.dbhCm, previous.date, current.date),
@@ -131,7 +206,18 @@ async function handleSubmit(): Promise<void> {
   submitting.value = true
   try {
     if (editingId.value === null) {
-      await create({ ...form }, 'survey')
+      await create(
+        {
+          ...form,
+          remeasureDate: '',
+          remeasureHeightM: null,
+          remeasureDbhCm: null,
+          remeasureCrownM: null,
+          remeasureLeanDeg: null,
+          remeasureHollowCount: null,
+        },
+        'survey'
+      )
       ElMessage.success('树体检查记录已登记')
     } else {
       await update(editingId.value, { ...form })
@@ -164,6 +250,56 @@ async function handleDelete(row: Survey): Promise<void> {
   }
   await remove(row.id)
   ElMessage.success('检查记录已删除')
+}
+
+/* ------------------------------ 补记复测 ------------------------------ */
+
+/** 打开复测弹窗：若已复测则回填上次复测值，否则回填原检查值 */
+function openRemeasure(row: Survey): void {
+  remeasureTarget.value = row
+  if (hasRemeasure(row)) {
+    remeasureForm.remeasureDate = row.remeasureDate
+    remeasureForm.remeasureHeightM = row.remeasureHeightM ?? row.heightM
+    remeasureForm.remeasureDbhCm = row.remeasureDbhCm ?? row.dbhCm
+    remeasureForm.remeasureCrownM = row.remeasureCrownM ?? row.crownM
+    remeasureForm.remeasureLeanDeg = row.remeasureLeanDeg ?? row.leanDeg
+    remeasureForm.remeasureHollowCount = row.remeasureHollowCount ?? row.hollowCount
+  } else {
+    Object.assign(remeasureForm, defaultRemeasureDraft(row))
+    remeasureForm.remeasureDate = today()
+  }
+  remeasureDialogVisible.value = true
+}
+
+async function handleRemeasureSubmit(): Promise<void> {
+  if (remeasureFormRef.value === undefined || remeasureTarget.value === null) return
+  const valid = await remeasureFormRef.value.validate().catch(() => false)
+  if (!valid) return
+  remeasureSubmitting.value = true
+  try {
+    const target = remeasureTarget.value
+    await update(target.id, {
+      remeasureDate: remeasureForm.remeasureDate,
+      remeasureHeightM: remeasureForm.remeasureHeightM,
+      remeasureDbhCm: remeasureForm.remeasureDbhCm,
+      remeasureCrownM: remeasureForm.remeasureCrownM,
+      remeasureLeanDeg: remeasureForm.remeasureLeanDeg,
+      remeasureHollowCount: remeasureForm.remeasureHollowCount,
+    })
+    ElMessage.success(`已补记 ${target.date} 检查的复测（${remeasureForm.remeasureDate}）`)
+    if (leanLevel(remeasureForm.remeasureLeanDeg) === 'danger') {
+      ElMessage({
+        type: 'warning',
+        message: `复测倾斜度 ${remeasureForm.remeasureLeanDeg}° 超过 ${LEAN_DANGER_DEG}° 警戒线，建议安排支撑加固`,
+        duration: 6000,
+      })
+    }
+    remeasureDialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '复测保存失败')
+  } finally {
+    remeasureSubmitting.value = false
+  }
 }
 </script>
 
@@ -276,28 +412,40 @@ async function handleDelete(row: Survey): Promise<void> {
             />
 
             <el-table v-else v-loading="loading" :data="displayRows" row-key="id" stripe>
-              <el-table-column prop="date" label="检查日期" width="120" />
+              <el-table-column label="检查日期" width="150">
+                <template #default="{ row }">
+                  <div class="cell-stack">
+                    <span>{{ row.date }}</span>
+                    <span v-if="eff(row).hasRemeasure" class="cell-sub cell-remeasure">
+                      <el-tag size="small" type="warning">已复测 {{ eff(row).remeasureDate }}</el-tag>
+                    </span>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column label="树高(m)" width="150">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.heightM }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.heightM ?? null, row.heightM, 'm') }}</span>
+                    <span>{{ eff(row).heightM }}</span>
+                    <span class="cell-sub">{{ deltaText(prevEff(row)?.heightM ?? null, eff(row).heightM, 'm') }}</span>
+                    <span v-if="eff(row).hasRemeasure" class="cell-sub cell-original">原 {{ row.heightM }}</span>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="胸径(cm)" width="150">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.dbhCm }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.dbhCm ?? null, row.dbhCm, 'cm') }}</span>
+                    <span>{{ eff(row).dbhCm }}</span>
+                    <span class="cell-sub">{{ deltaText(prevEff(row)?.dbhCm ?? null, eff(row).dbhCm, 'cm') }}</span>
+                    <span v-if="eff(row).hasRemeasure" class="cell-sub cell-original">原 {{ row.dbhCm }}</span>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="冠幅(m)" width="140">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.crownM }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.crownM ?? null, row.crownM, 'm') }}</span>
+                    <span>{{ eff(row).crownM }}</span>
+                    <span class="cell-sub">{{ deltaText(prevEff(row)?.crownM ?? null, eff(row).crownM, 'm') }}</span>
+                    <span v-if="eff(row).hasRemeasure" class="cell-sub cell-original">原 {{ row.crownM }}</span>
                   </div>
                 </template>
               </el-table-column>
@@ -305,22 +453,25 @@ async function handleDelete(row: Survey): Promise<void> {
                 <template #default="{ row }">
                   <el-tag
                     size="small"
-                    :type="leanLevel(row.leanDeg) === 'danger' ? 'danger' : leanLevel(row.leanDeg) === 'watch' ? 'warning' : 'success'"
+                    :type="leanLevel(eff(row).leanDeg) === 'danger' ? 'danger' : leanLevel(eff(row).leanDeg) === 'watch' ? 'warning' : 'success'"
                   >
-                    {{ row.leanDeg }}°
+                    {{ eff(row).leanDeg }}°
                   </el-tag>
                 </template>
               </el-table-column>
               <el-table-column label="空洞" width="90" align="right">
-                <template #default="{ row }">{{ row.hollowCount }} 处</template>
+                <template #default="{ row }">{{ eff(row).hollowCount }} 处</template>
               </el-table-column>
               <el-table-column label="立地状况" width="110">
                 <template #default="{ row }">
                   <el-tag size="small" type="info">{{ row.siteNote }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="140" fixed="right">
+              <el-table-column label="操作" width="200" fixed="right">
                 <template #default="{ row }">
+                  <el-button link type="primary" size="small" @click="openRemeasure(row)">
+                    {{ hasRemeasure(row) ? '改复测' : '复测' }}
+                  </el-button>
                   <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
                   <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
                 </template>
@@ -410,6 +561,82 @@ async function handleDelete(row: Survey): Promise<void> {
         <el-button type="primary" :loading="submitting" @click="handleSubmit">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 补记复测弹窗：复测值用于修正年生长量与风险判定，不新增到场检查 -->
+    <el-dialog
+      v-model="remeasureDialogVisible"
+      :title="remeasureTarget === null ? '补记复测' : `补记复测 · ${remeasureTarget.date} 检查`"
+      width="660px"
+    >
+      <el-alert
+        type="info"
+        show-icon
+        :closable="false"
+        class="mb-14"
+        title="复测是对本次检查测量值的修正，不新增到场检查、不增加检查次数。"
+        description="保存后该株古树的年生长量、倾斜空洞风险、档案列表与养护总览导出均改用复测值；复测日期须晚于原检查日期且不晚于今天。"
+      />
+      <el-form ref="remeasureFormRef" :model="remeasureForm" :rules="remeasureRules" label-width="110px">
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="复测日期" prop="remeasureDate">
+              <el-date-picker
+                v-model="remeasureForm.remeasureDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                :disabled-date="(d: Date) => remeasureTarget !== null && d <= new Date(`${remeasureTarget.date}T00:00:00`)"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="原检查日期">
+              <el-input :model-value="remeasureTarget?.date ?? ''" readonly />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="树高（m）" prop="remeasureHeightM">
+              <el-input-number v-model="remeasureForm.remeasureHeightM" :min="0.1" :max="120" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="胸径（cm）" prop="remeasureDbhCm">
+              <el-input-number v-model="remeasureForm.remeasureDbhCm" :min="1" :max="600" :step="0.5" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="冠幅（m）" prop="remeasureCrownM">
+              <el-input-number v-model="remeasureForm.remeasureCrownM" :min="0.1" :max="80" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="倾斜度（°）" prop="remeasureLeanDeg">
+              <el-input-number v-model="remeasureForm.remeasureLeanDeg" :min="0" :max="90" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="空洞数（处）" prop="remeasureHollowCount">
+              <el-input-number v-model="remeasureForm.remeasureHollowCount" :min="0" :max="99" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-alert
+          :type="leanLevel(remeasureForm.remeasureLeanDeg) === 'danger' ? 'error' : leanLevel(remeasureForm.remeasureLeanDeg) === 'watch' ? 'warning' : 'success'"
+          show-icon
+          :closable="false"
+          :title="`复测倾斜度判定：${leanLevel(remeasureForm.remeasureLeanDeg) === 'danger' ? '超限' : leanLevel(remeasureForm.remeasureLeanDeg) === 'watch' ? '需关注' : '正常'}`"
+          :description="`安全阈值：< ${LEAN_WATCH_DEG}° 正常；${LEAN_WATCH_DEG}–${LEAN_DANGER_DEG}° 需关注；> ${LEAN_DANGER_DEG}° 超限。`"
+        />
+      </el-form>
+      <template #footer>
+        <el-button @click="remeasureDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="remeasureSubmitting" @click="handleRemeasureSubmit">保存复测</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -444,6 +671,15 @@ async function handleDelete(row: Survey): Promise<void> {
 .cell-sub {
   font-size: 12px;
   color: #8c8479;
+}
+
+.cell-remeasure {
+  margin-top: 2px;
+}
+
+.cell-original {
+  color: #b8b0a4;
+  font-size: 11px;
 }
 
 .timeline-title {

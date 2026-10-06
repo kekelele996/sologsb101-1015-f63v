@@ -9,6 +9,7 @@ import type { Survey } from '../types/survey'
 import type { Measure } from '../types/measure'
 import type { Support } from '../types/support'
 import type { Review } from '../types/review'
+import { effectiveSurvey } from '../utils/dimension'
 import { db, initDatabase } from '../utils/db'
 
 /** 时间线条目类型 */
@@ -40,13 +41,16 @@ export function buildHistory(
 ): HistoryItem[] {
   const items: HistoryItem[] = []
   surveys.forEach((row) => {
+    const eff = effectiveSurvey(row)
     items.push({
       key: `survey-${row.id}`,
       kind: 'survey',
-      date: row.date,
-      title: `树体检查 · 树高 ${row.heightM} m / 胸径 ${row.dbhCm} cm`,
-      detail: `冠幅 ${row.crownM} m，倾斜 ${row.leanDeg}°，空洞 ${row.hollowCount} 处，立地：${row.siteNote}`,
-      badge: row.siteNote,
+      date: eff.date,
+      title: `树体检查 · 树高 ${eff.heightM} m / 胸径 ${eff.dbhCm} cm`,
+      detail: eff.hasRemeasure
+        ? `冠幅 ${eff.crownM} m，倾斜 ${eff.leanDeg}°，空洞 ${eff.hollowCount} 处，立地：${eff.siteNote}（${eff.remeasureDate} 复测）`
+        : `冠幅 ${eff.crownM} m，倾斜 ${eff.leanDeg}°，空洞 ${eff.hollowCount} 处，立地：${eff.siteNote}`,
+      badge: eff.hasRemeasure ? '已复测' : eff.siteNote,
     })
   })
   measures.forEach((row) => {

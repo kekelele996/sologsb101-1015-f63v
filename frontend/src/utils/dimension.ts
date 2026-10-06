@@ -6,6 +6,7 @@
  * - 加固件检查周期超期判定
  */
 import type { Vigor } from '../types/review'
+import type { SiteNote, Survey } from '../types/survey'
 import { today } from './id'
 
 /** 厘米 → 米（保留 3 位小数） */
@@ -45,6 +46,45 @@ export function annualGrowth(previous: number, current: number, previousDate: st
   const days = daysBetween(previousDate, currentDate)
   if (days < 30) return round2(delta)
   return round2((delta / days) * 365)
+}
+
+/**
+ * 检查记录的「有效值」：
+ * 若该检查已补记复测，则树高 / 胸径 / 冠幅 / 倾斜度 / 空洞数改用复测值，
+ * 生长量年化的生效日期也改用复测日期（复测值是在复测当天量取的）；
+ * 未复测时原样返回原检查值与原检查日期。
+ * 年生长量、倾斜空洞风险、档案列表与养护总览导出统一消费此派生值。
+ */
+export interface EffectiveSurvey {
+  /** 生效日期（复测日期优先，否则为原检查日期） */
+  date: string
+  heightM: number
+  dbhCm: number
+  crownM: number
+  leanDeg: number
+  hollowCount: number
+  siteNote: SiteNote
+  /** 是否已补记复测 */
+  hasRemeasure: boolean
+  /** 复测日期（未复测为空字符串） */
+  remeasureDate: string
+}
+
+export function effectiveSurvey(row: Survey): EffectiveSurvey {
+  const remeasured = typeof row.remeasureDate === 'string' && row.remeasureDate !== ''
+  const pick = <T>(remeasureVal: T | null, originalVal: T): T =>
+    remeasured && remeasureVal !== null ? remeasureVal : originalVal
+  return {
+    date: remeasured ? row.remeasureDate : row.date,
+    heightM: pick(row.remeasureHeightM, row.heightM),
+    dbhCm: pick(row.remeasureDbhCm, row.dbhCm),
+    crownM: pick(row.remeasureCrownM, row.crownM),
+    leanDeg: pick(row.remeasureLeanDeg, row.leanDeg),
+    hollowCount: pick(row.remeasureHollowCount, row.hollowCount),
+    siteNote: row.siteNote,
+    hasRemeasure: remeasured,
+    remeasureDate: remeasured ? row.remeasureDate : '',
+  }
 }
 
 /** 倾斜安全等级 */

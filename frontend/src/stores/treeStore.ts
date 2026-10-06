@@ -25,8 +25,10 @@ import { nowIso, uuid } from '../utils/id'
 import {
   LEAN_LEVEL_LABEL,
   annualGrowth,
+  effectiveSurvey,
   isSupportOverdue,
   leanLevel,
+  type EffectiveSurvey,
   type LeanLevel,
 } from '../utils/dimension'
 
@@ -41,7 +43,8 @@ export interface TreeFilters {
 export interface TreeStat {
   treeId: string
   surveyCount: number
-  latestSurvey: Survey | null
+  /** 最近一次检查的有效值（已复测则取复测值） */
+  latestSurvey: EffectiveSurvey | null
   /** 树高年生长量（米/年） */
   heightAnnual: number
   /** 胸径年生长量（厘米/年） */
@@ -125,8 +128,10 @@ export const useTreeStore = defineStore('tree', () => {
   const stats = computed<Record<string, TreeStat>>(() => {
     const result: Record<string, TreeStat> = {}
     trees.value.forEach((tree) => {
+      // 全部检查映射为「有效值」（已复测取复测值），再按生效日期排序
       const treeSurveys = surveys.value
         .filter((row) => row.treeId === tree.id)
+        .map((row) => effectiveSurvey(row))
         .sort((a, b) => a.date.localeCompare(b.date))
       const latest = treeSurveys.length > 0 ? treeSurveys[treeSurveys.length - 1] : null
       const previous = treeSurveys.length > 1 ? treeSurveys[treeSurveys.length - 2] : null

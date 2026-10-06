@@ -10,7 +10,7 @@ import type { Measure } from '../types/measure'
 import type { Support } from '../types/support'
 import type { Review } from '../types/review'
 import { stampSuffix } from './id'
-import { isSupportOverdue, overdueDays } from './dimension'
+import { effectiveSurvey, isSupportOverdue, overdueDays } from './dimension'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -109,7 +109,11 @@ export function buildTreeCsv(
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   trees.forEach((tree) => {
-    const treeSurveys = surveys.filter((row) => row.treeId === tree.id).sort((a, b) => a.date.localeCompare(b.date))
+    // 检查记录映射为有效值（已复测取复测值），按生效日期取最近一次
+    const treeSurveys = surveys
+      .filter((row) => row.treeId === tree.id)
+      .map((row) => effectiveSurvey(row))
+      .sort((a, b) => a.date.localeCompare(b.date))
     const latest = treeSurveys.length > 0 ? treeSurveys[treeSurveys.length - 1] : null
     const treeMeasures = measures.filter((row) => row.treeId === tree.id)
     const treeSupports = supports.filter((row) => row.treeId === tree.id)

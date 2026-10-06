@@ -100,12 +100,13 @@ sologsb101-1015/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbheritagetree`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移，`version(3)` 为 `surveys` 补齐复测字段：
   * `surveys` 增加 `[treeId+date]` 复合索引、`measures` 增加 `operator` 索引、`supports` 增加 `lastCheckDate` 索引、`reviews` 增加 `trend` 索引；
   * 回填 `revision` / `createdAt` / `updatedAt`；
   * 为 `trees` 补齐 `lastMeasureDate`（最近复壮日期）回写字段；
   * 为 `reviews` 补齐 `followUp`（后续措施）字段；
-  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值。
+  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值；
+  * 为 `surveys` 补齐 `remeasureDate` / `remeasureHeightM` / `remeasureDbhCm` / `remeasureCrownM` / `remeasureLeanDeg` / `remeasureHollowCount` 复测字段（默认空 / null，表示尚未复测）。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -151,6 +152,7 @@ npm run preview      # 预览 dist 产物
 * **倾斜安全阈值**：< 5° 正常；5°–10° 需关注；> 10° 超限（`src/utils/dimension.ts`）。
 * **空洞风险**：1–2 处需关注，≥ 3 处判定为高风险，建议立即安排树洞修补与防腐处理。
 * **生长量年化**：由最近两次检查的差值按实际天数折算为「每年」增量，间隔不足 30 天时退回直接差值。
+* **复测修正**：每条检查可补记一次复测（复测日期、树高、胸径、冠幅、倾斜度、空洞数），复测值用于年生长量、倾斜空洞风险、档案列表与养护总览导出；复测不新增到场检查（检查次数不变），检查日期保留原到场日期，生长量生效日期改用复测日期；复测日期须晚于原检查日期且不晚于今天。
 * **加固件超期**：`最近检查日期 + 检查周期（月）` 早于今天即为超期，列表自动高亮并在顶部汇总提醒；
   「登记本次检查」会把最近检查日期置为今天并解除高亮。
 * **复评强制校验**：长势为「衰弱」或「濒危」时，后续措施为必填项，未填写无法保存。

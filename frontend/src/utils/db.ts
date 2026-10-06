@@ -18,7 +18,7 @@ import { seedDatabase } from './seed'
 export const DB_NAME = 'gbheritagetree'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2
+export const DB_SCHEMA_VERSION = 3
 
 /** 数据行结构修订号 */
 export const ROW_REVISION = 2
@@ -43,7 +43,7 @@ class HeritageTreeDatabase extends Dexie {
     })
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
         // 复合索引 [treeId+date]：按古树 + 日期快速取检查记录
@@ -80,6 +80,27 @@ class HeritageTreeDatabase extends Dexie {
         await tx.table('supports').toCollection().modify((row: Record<string, unknown>) => {
           if (typeof row.lastCheckDate !== 'string') row.lastCheckDate = ''
           if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
+        })
+      })
+
+      // ---------- v3：树体检查补记复测字段 ----------
+    this.version(3)
+      .stores({
+        trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
+        surveys: 'id, treeId, [treeId+date], date, siteNote',
+        measures: 'id, treeId, type, state, date, operator',
+        supports: 'id, treeId, type, installDate, lastCheckDate',
+        reviews: 'id, treeId, date, vigor, trend',
+      })
+      .upgrade(async (tx) => {
+        // 迁移 5：检查记录补齐复测字段（默认空 / null，表示尚未复测）
+        await tx.table('surveys').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.remeasureDate !== 'string') row.remeasureDate = ''
+          if (row.remeasureHeightM === undefined) row.remeasureHeightM = null
+          if (row.remeasureDbhCm === undefined) row.remeasureDbhCm = null
+          if (row.remeasureCrownM === undefined) row.remeasureCrownM = null
+          if (row.remeasureLeanDeg === undefined) row.remeasureLeanDeg = null
+          if (row.remeasureHollowCount === undefined) row.remeasureHollowCount = null
         })
       })
   }
