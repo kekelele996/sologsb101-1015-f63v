@@ -2,6 +2,8 @@
 /**
  * /trees/:id/surveys 树体与立地检查
  * 录树高 / 胸径 / 冠幅 / 倾斜 / 空洞并对比上次，展示古树历史时间线。
+ * 每条检查可补记一条复测（不算新到场检查、不挪动原检查日期），
+ * 年生长量、倾斜 / 空洞风险与各类导出一律以复测值为准。
  * 消费模型：Survey、Tree；复用组件：<StatBadge>、<EmptyPanel>
  */
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -13,8 +15,26 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { HISTORY_KIND_LABEL, useTreeHistory } from '@/hooks/useTreeHistory'
 import { useTreeStore } from '@/stores/treeStore'
 import { db } from '@/utils/db'
-import { SITE_NOTE_OPTIONS, type SiteNote, type Survey, type SurveyDraft } from '@/types/survey'
-import { LEAN_DANGER_DEG, LEAN_WATCH_DEG, annualGrowth, hollowRisk, leanLevel, siteAdvice } from '@/utils/dimension'
+import {
+  SITE_NOTE_OPTIONS,
+  type SiteNote,
+  type RetestDraft,
+  type Survey,
+  type SurveyDraft,
+} from '@/types/survey'
+import { today } from '@/utils/id'
+import {
+  LEAN_DANGER_DEG,
+  LEAN_WATCH_DEG,
+  annualGrowth,
+  hollowRisk,
+  isValidRetestDate,
+  leanLevel,
+  siteAdvice,
+  sortSurveyPoints,
+  surveyPoint,
+  type SurveyPoint,
+} from '@/utils/dimension'
 
 const route = useRoute()
 const router = useRouter()
@@ -51,19 +71,71 @@ const rules: FormRules<SurveyDraft> = {
   siteNote: [{ required: true, message: '请选择立地状况', trigger: 'change' }],
 }
 
-/** 该株古树的检查记录，按日期升序 */
+/* ------------------------------ 复测弹窗 ------------------------------ */
+
+const retestVisible = ref(false)
+const retestSubmitting = ref(false)
+/** 当前正在补记 / 编辑复测的检查 */
+const retestTarget = ref<Survey | null>(null)
+const retestFormRef = ref<FormInstance>()
+
+const retestForm = reactive<RetestDraft>({
+  retestDate: '',
+  heightM: 12,
+  dbhCm: 60,
+  crownM: 8,
+  leanDeg: 2,
+  hollowCount: 0,
+})
+
+const retestRules: FormRules<RetestDraft> = {
+  retestDate: [
+    { required: true, message: '请选择复测日期', trigger: 'change' },
+    {
+      validator: (_rule, value: string, callback: (error?: Error) => void) => {
+        const target = retestTarget.value
+        if (target !== null && !isValidRetestDate(target.date, value)) {
+          callback(new Error(`复测日期必须晚于原检查日期（${target.date}），且不晚于今天`))
+          return
+        }
+        callback()
+      },
+      trigger: 'change',
+    },
+  ],
+  heightM: [{ required: true, message: '请填写复测树高', trigger: 'blur' }],
+  dbhCm: [{ required: true, message: '请填写复测胸径', trigger: 'blur' }],
+  crownM: [{ required: true, message: '请填写复测冠幅', trigger: 'blur' }],
+  leanDeg: [{ required: true, message: '请填写复测倾斜度', trigger: 'blur' }],
+  hollowCount: [{ required: true, message: '请填写复测空洞数', trigger: 'blur' }],
+}
+
+/** 该株古树的到场检查（按日期升序），复测不新增条目 */
 const surveys = computed<Survey[]>(() =>
   rows.value
     .filter((row) => row.treeId === treeId.value)
-    .sort((a, b) => a.date.localeCompare(b.date))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
 )
 
-/** 表格展示顺序：日期倒序 */
+/** 生效测量点（有复测取复测值，日期仍为原检查日期），按日期升序 */
+const points = computed<SurveyPoint[]>(() => sortSurveyPoints(surveys.value))
+
+/** 表格展示顺序：日期倒序；行数据保留原检查，便于操作与复测展示 */
 const displayRows = computed<Survey[]>(() => [...surveys.value].reverse())
 
-function previousOf(row: Survey): Survey | null {
-  const index = surveys.value.findIndex((item) => item.id === row.id)
-  return index > 0 ? surveys.value[index - 1] : null
+const pointBySurveyId = computed<Map<string, SurveyPoint>>(() => {
+  const map = new Map<string, SurveyPoint>()
+  points.value.forEach((point) => map.set(point.surveyId, point))
+  return map
+})
+
+function pointOf(row: Survey): SurveyPoint {
+  return pointBySurveyId.value.get(row.id) ?? surveyPoint(row)
+}
+
+function previousPointOf(row: Survey): SurveyPoint | null {
+  const index = points.value.findIndex((point) => point.surveyId === row.id)
+  return index > 0 ? points.value[index - 1] : null
 }
 
 function deltaText(previous: number | null, current: number, unit: string): string {
@@ -73,14 +145,16 @@ function deltaText(previous: number | null, current: number, unit: string): stri
   return `${delta > 0 ? '+' : ''}${delta} ${unit}`
 }
 
-const latest = computed<Survey | null>(() =>
-  surveys.value.length === 0 ? null : surveys.value[surveys.value.length - 1]
+const latest = computed<SurveyPoint | null>(() =>
+  points.value.length === 0 ? null : points.value[points.value.length - 1]
 )
 
+const retestCount = computed<number>(() => points.value.filter((point) => point.retested).length)
+
 const annual = computed(() => {
-  if (surveys.value.length < 2) return { height: 0, dbh: 0, crown: 0 }
-  const current = surveys.value[surveys.value.length - 1]
-  const previous = surveys.value[surveys.value.length - 2]
+  if (points.value.length < 2) return { height: 0, dbh: 0, crown: 0 }
+  const current = points.value[points.value.length - 1]
+  const previous = points.value[points.value.length - 2]
   return {
     height: annualGrowth(previous.heightM, current.heightM, previous.date, current.date),
     dbh: annualGrowth(previous.dbhCm, current.dbhCm, previous.date, current.date),
@@ -131,9 +205,11 @@ async function handleSubmit(): Promise<void> {
   submitting.value = true
   try {
     if (editingId.value === null) {
-      await create({ ...form }, 'survey')
+      // 新到场检查默认无复测
+      await create({ ...form, retest: null }, 'survey')
       ElMessage.success('树体检查记录已登记')
     } else {
+      // 编辑只改原检查本身，复测保留并继续以复测值生效
       await update(editingId.value, { ...form })
       ElMessage.success('检查记录已更新')
     }
@@ -154,16 +230,88 @@ async function handleSubmit(): Promise<void> {
 
 async function handleDelete(row: Survey): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确认删除 ${row.date} 的检查记录？`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
+    await ElMessageBox.confirm(
+      !row.retest
+        ? `确认删除 ${row.date} 的检查记录？`
+        : `确认删除 ${row.date} 的检查记录（含 ${row.retest.retestDate} 的复测）？`,
+      '删除确认',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      }
+    )
   } catch {
     return
   }
   await remove(row.id)
   ElMessage.success('检查记录已删除')
+}
+
+/* ------------------------------ 复测增改撤 ------------------------------ */
+
+function openRetest(row: Survey): void {
+  retestTarget.value = row
+  const existing = row.retest
+  Object.assign(retestForm, {
+    retestDate: existing?.retestDate ?? today(),
+    heightM: existing?.heightM ?? row.heightM,
+    dbhCm: existing?.dbhCm ?? row.dbhCm,
+    crownM: existing?.crownM ?? row.crownM,
+    leanDeg: existing?.leanDeg ?? row.leanDeg,
+    hollowCount: existing?.hollowCount ?? row.hollowCount,
+  })
+  retestVisible.value = true
+  // 弹窗打开后清掉上一次的校验状态
+  void Promise.resolve().then(() => retestFormRef.value?.clearValidate())
+}
+
+/** 复测日期选择器禁用：不晚于今天，且不早于/等于原检查日期 */
+function retestDateDisabled(date: Date): boolean {
+  const target = retestTarget.value
+  if (target === null) return false
+  const todayMs = Number(new Date(`${today()}T00:00:00`))
+  if (date.getTime() > todayMs) return true
+  return date.getTime() <= Number(new Date(`${target.date}T00:00:00`))
+}
+
+async function handleRetestSubmit(): Promise<void> {
+  if (retestFormRef.value === undefined || retestTarget.value === null) return
+  const valid = await retestFormRef.value.validate().catch(() => false)
+  if (!valid) return
+  if (!isValidRetestDate(retestTarget.value.date, retestForm.retestDate)) {
+    ElMessage.error(`复测日期必须晚于原检查日期（${retestTarget.value.date}），且不晚于今天`)
+    return
+  }
+  retestSubmitting.value = true
+  try {
+    await update(retestTarget.value.id, {
+      retest: { ...retestForm },
+    })
+    ElMessage.success(`复测已保存：${retestTarget.value.date} 检查的各项数值改按复测值统计`)
+    retestVisible.value = false
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+  } finally {
+    retestSubmitting.value = false
+  }
+}
+
+async function handleRetestRevoke(): Promise<void> {
+  if (retestTarget.value === null || !retestTarget.value.retest) return
+  const target = retestTarget.value
+  try {
+    await ElMessageBox.confirm(
+      `撤销后 ${target.date} 的检查将恢复采用首测数值，年生长量与倾斜 / 空洞风险也随之改回首测值。`,
+      '确认撤销该次复测？',
+      { type: 'warning', confirmButtonText: '撤销复测', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
+    )
+  } catch {
+    return
+  }
+  await update(target.id, { retest: null })
+  ElMessage.success('复测已撤销，恢复采用首测值')
+  retestVisible.value = false
 }
 </script>
 
@@ -195,7 +343,22 @@ async function handleDelete(row: Survey): Promise<void> {
 
     <template v-else>
       <div class="stat-row">
-        <StatBadge label="检查次数" :value="surveys.length" suffix="次" tone="primary" icon="Histogram" />
+        <StatBadge
+          label="到场检查次数"
+          :value="surveys.length"
+          suffix="次"
+          tone="primary"
+          icon="Histogram"
+          :hint="retestCount > 0 ? `到场检查 ${surveys.length} 次；另有 ${retestCount} 条补记复测（不计数，数值以复测为准）` : '补记复测不算新到场检查，不计入次数'"
+        />
+        <StatBadge
+          label="补记复测"
+          :value="retestCount"
+          suffix="条"
+          :tone="retestCount > 0 ? 'warning' : 'default'"
+          icon="DataLine"
+          hint="复测用于更正首测数值，不改原检查日期"
+        />
         <StatBadge
           label="最新树高"
           :value="latest === null ? '—' : latest.heightM"
@@ -216,7 +379,7 @@ async function handleDelete(row: Survey): Promise<void> {
           suffix="m/年"
           tone="primary"
           icon="TrendCharts"
-          hint="由最近两次检查的树高差按天数年化"
+          hint="由最近两次检查（复测值）的树高差按原检查日期年化"
         />
         <StatBadge
           label="胸径年生长量"
@@ -235,6 +398,14 @@ async function handleDelete(row: Survey): Promise<void> {
         />
       </div>
 
+      <el-alert
+        v-if="retestCount > 0"
+        type="info"
+        show-icon
+        :closable="false"
+        class="mb-14"
+        title="本树已有补记复测：复测只是对原检查的测量更正，不算新到场检查，检查次数不增加、日期不挪动；年生长量、倾斜 / 空洞风险与养护总览导出均以复测值为准。"
+      />
       <el-alert
         v-if="risk !== null && risk.level !== 'safe'"
         :type="risk.level === 'danger' ? 'error' : 'warning'"
@@ -276,51 +447,93 @@ async function handleDelete(row: Survey): Promise<void> {
             />
 
             <el-table v-else v-loading="loading" :data="displayRows" row-key="id" stripe>
-              <el-table-column prop="date" label="检查日期" width="120" />
+              <el-table-column label="检查日期" width="150">
+                <template #default="{ row }">
+                  <div class="cell-stack">
+                    <span>{{ row.date }}</span>
+                    <el-tag
+                      v-if="row.retest"
+                      size="small"
+                      type="warning"
+                      effect="plain"
+                      class="cell-retest-tag"
+                    >
+                      复测 {{ row.retest.retestDate }}
+                    </el-tag>
+                    <span v-else class="cell-sub">到场检查</span>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column label="树高(m)" width="150">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.heightM }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.heightM ?? null, row.heightM, 'm') }}</span>
+                    <span>
+                      {{ pointOf(row).heightM }}
+                      <el-tag v-if="pointOf(row).retested" size="small" type="warning" effect="plain">复测值</el-tag>
+                    </span>
+                    <span v-if="pointOf(row).retested" class="cell-retest-old">原测 {{ row.heightM }}</span>
+                    <span class="cell-sub">{{ deltaText(previousPointOf(row)?.heightM ?? null, pointOf(row).heightM, 'm') }}</span>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="胸径(cm)" width="150">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.dbhCm }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.dbhCm ?? null, row.dbhCm, 'cm') }}</span>
+                    <span>
+                      {{ pointOf(row).dbhCm }}
+                      <el-tag v-if="pointOf(row).retested" size="small" type="warning" effect="plain">复测值</el-tag>
+                    </span>
+                    <span v-if="pointOf(row).retested" class="cell-retest-old">原测 {{ row.dbhCm }}</span>
+                    <span class="cell-sub">{{ deltaText(previousPointOf(row)?.dbhCm ?? null, pointOf(row).dbhCm, 'cm') }}</span>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="冠幅(m)" width="140">
                 <template #default="{ row }">
                   <div class="cell-stack">
-                    <span>{{ row.crownM }}</span>
-                    <span class="cell-sub">{{ deltaText(previousOf(row)?.crownM ?? null, row.crownM, 'm') }}</span>
+                    <span>
+                      {{ pointOf(row).crownM }}
+                      <el-tag v-if="pointOf(row).retested" size="small" type="warning" effect="plain">复测值</el-tag>
+                    </span>
+                    <span v-if="pointOf(row).retested" class="cell-retest-old">原测 {{ row.crownM }}</span>
+                    <span class="cell-sub">{{ deltaText(previousPointOf(row)?.crownM ?? null, pointOf(row).crownM, 'm') }}</span>
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="倾斜度" width="130">
+              <el-table-column label="倾斜度" width="140">
                 <template #default="{ row }">
                   <el-tag
                     size="small"
-                    :type="leanLevel(row.leanDeg) === 'danger' ? 'danger' : leanLevel(row.leanDeg) === 'watch' ? 'warning' : 'success'"
+                    :type="leanLevel(pointOf(row).leanDeg) === 'danger' ? 'danger' : leanLevel(pointOf(row).leanDeg) === 'watch' ? 'warning' : 'success'"
                   >
-                    {{ row.leanDeg }}°
+                    {{ pointOf(row).leanDeg }}°
                   </el-tag>
+                  <span v-if="pointOf(row).retested" class="cell-retest-old">原测 {{ row.leanDeg }}°</span>
                 </template>
               </el-table-column>
-              <el-table-column label="空洞" width="90" align="right">
-                <template #default="{ row }">{{ row.hollowCount }} 处</template>
+              <el-table-column label="空洞" width="110" align="right">
+                <template #default="{ row }">
+                  <div class="cell-stack">
+                    <span>{{ pointOf(row).hollowCount }} 处</span>
+                    <span v-if="pointOf(row).retested" class="cell-retest-old">原测 {{ row.hollowCount }} 处</span>
+                  </div>
+                </template>
               </el-table-column>
-              <el-table-column label="立地状况" width="110">
+              <el-table-column label="立地状况" width="100">
                 <template #default="{ row }">
                   <el-tag size="small" type="info">{{ row.siteNote }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="140" fixed="right">
+              <el-table-column label="操作" width="210" fixed="right">
                 <template #default="{ row }">
+                  <el-button
+                    :type="!row.retest ? 'warning' : 'primary'"
+                    link
+                    size="small"
+                    @click="openRetest(row)"
+                  >
+                    {{ !row.retest ? '补记复测' : '改/撤复测' }}
+                  </el-button>
                   <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
                   <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
                 </template>
@@ -410,6 +623,89 @@ async function handleDelete(row: Survey): Promise<void> {
         <el-button type="primary" :loading="submitting" @click="handleSubmit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="retestVisible"
+      :title="!retestTarget?.retest ? `补记复测 · ${retestTarget?.date ?? ''} 检查` : `编辑复测 · 原检查 ${retestTarget?.date ?? ''}`"
+      width="660px"
+    >
+      <el-alert
+        type="warning"
+        show-icon
+        :closable="false"
+        class="mb-14"
+        title="复测是对当场检查的测量更正：不算一次新到场检查（检查次数不增加），生长量时间轴仍用原检查日期；保存后该株树的年生长量、倾斜 / 空洞风险、档案列表与养护总览导出均改用复测值。"
+      />
+      <el-form ref="retestFormRef" :model="retestForm" :rules="retestRules" label-width="110px">
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="原检查日期">
+              <el-input :model-value="retestTarget?.date ?? ''" disabled />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="复测日期" prop="retestDate">
+              <el-date-picker
+                v-model="retestForm.retestDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="晚于原检查、不晚于今天"
+                style="width: 100%"
+                :disabled-date="retestDateDisabled"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="复测树高（m）" prop="heightM">
+              <el-input-number v-model="retestForm.heightM" :min="0.1" :max="120" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="复测胸径（cm）" prop="dbhCm">
+              <el-input-number v-model="retestForm.dbhCm" :min="1" :max="600" :step="0.5" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="复测冠幅（m）" prop="crownM">
+              <el-input-number v-model="retestForm.crownM" :min="0.1" :max="80" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="复测倾斜度（°）" prop="leanDeg">
+              <el-input-number v-model="retestForm.leanDeg" :min="0" :max="90" :step="0.1" :precision="2" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="复测空洞数（处）" prop="hollowCount">
+              <el-input-number v-model="retestForm.hollowCount" :min="0" :max="99" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-alert
+          :type="leanLevel(retestForm.leanDeg) === 'danger' ? 'error' : leanLevel(retestForm.leanDeg) === 'watch' ? 'warning' : 'success'"
+          show-icon
+          :closable="false"
+          :title="`复测倾斜度判定：${leanLevel(retestForm.leanDeg) === 'danger' ? '超限' : leanLevel(retestForm.leanDeg) === 'watch' ? '需关注' : '正常'}`"
+          :description="`安全阈值：< ${LEAN_WATCH_DEG}° 正常；${LEAN_WATCH_DEG}–${LEAN_DANGER_DEG}° 需关注；> ${LEAN_DANGER_DEG}° 超限。立地状况沿用原检查记录。`"
+        />
+      </el-form>
+      <template #footer>
+        <el-button
+          v-if="retestTarget?.retest"
+          type="danger"
+          plain
+          @click="handleRetestRevoke"
+        >
+          撤销复测
+        </el-button>
+        <el-button @click="retestVisible = false">取消</el-button>
+        <el-button type="primary" :loading="retestSubmitting" @click="handleRetestSubmit">保存复测</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -444,6 +740,16 @@ async function handleDelete(row: Survey): Promise<void> {
 .cell-sub {
   font-size: 12px;
   color: #8c8479;
+}
+
+.cell-retest-old {
+  font-size: 12px;
+  color: #b08a4a;
+  text-decoration: line-through;
+}
+
+.cell-retest-tag {
+  width: fit-content;
 }
 
 .timeline-title {

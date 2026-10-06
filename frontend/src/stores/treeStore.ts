@@ -27,7 +27,9 @@ import {
   annualGrowth,
   isSupportOverdue,
   leanLevel,
+  sortSurveyPoints,
   type LeanLevel,
+  type SurveyPoint,
 } from '../utils/dimension'
 
 /** 古树筛选条件（关键字 + 保护级别 + 树种），由 <FilterBar> 同步到 URL query */
@@ -40,8 +42,12 @@ export interface TreeFilters {
 /** 单株古树的派生统计，供档案页、检查页、加固页与复评页复用 */
 export interface TreeStat {
   treeId: string
+  /** 到场检查次数（补记复测不计数） */
   surveyCount: number
-  latestSurvey: Survey | null
+  /** 已补记复测的检查条数 */
+  retestCount: number
+  /** 最近一次检查的生效测量点（有复测则取复测值） */
+  latestPoint: SurveyPoint | null
   /** 树高年生长量（米/年） */
   heightAnnual: number
   /** 胸径年生长量（厘米/年） */
@@ -85,7 +91,8 @@ function writeCurrentTreeId(id: string | null): void {
 
 const EMPTY_STAT: Omit<TreeStat, 'treeId'> = {
   surveyCount: 0,
-  latestSurvey: null,
+  retestCount: 0,
+  latestPoint: null,
   heightAnnual: 0,
   dbhAnnual: 0,
   lean: 'safe',
@@ -125,11 +132,10 @@ export const useTreeStore = defineStore('tree', () => {
   const stats = computed<Record<string, TreeStat>>(() => {
     const result: Record<string, TreeStat> = {}
     trees.value.forEach((tree) => {
-      const treeSurveys = surveys.value
-        .filter((row) => row.treeId === tree.id)
-        .sort((a, b) => a.date.localeCompare(b.date))
-      const latest = treeSurveys.length > 0 ? treeSurveys[treeSurveys.length - 1] : null
-      const previous = treeSurveys.length > 1 ? treeSurveys[treeSurveys.length - 2] : null
+      // 生效测量点：补记复测的检查以复测值参与统计，但日期仍取原检查日期
+      const points = sortSurveyPoints(surveys.value.filter((row) => row.treeId === tree.id))
+      const latest = points.length > 0 ? points[points.length - 1] : null
+      const previous = points.length > 1 ? points[points.length - 2] : null
       const treeMeasures = measures.value.filter((row) => row.treeId === tree.id)
       const treeSupports = supports.value.filter((row) => row.treeId === tree.id)
       const treeReviews = reviews.value
@@ -139,8 +145,9 @@ export const useTreeStore = defineStore('tree', () => {
       const lean = latest === null ? 'safe' : leanLevel(latest.leanDeg)
       result[tree.id] = {
         treeId: tree.id,
-        surveyCount: treeSurveys.length,
-        latestSurvey: latest,
+        surveyCount: points.length,
+        retestCount: points.filter((point) => point.retested).length,
+        latestPoint: latest,
         heightAnnual:
           latest !== null && previous !== null
             ? annualGrowth(previous.heightM, latest.heightM, previous.date, latest.date)

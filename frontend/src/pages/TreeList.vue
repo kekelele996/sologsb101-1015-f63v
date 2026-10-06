@@ -216,8 +216,15 @@ function handleFilterChange(key: string, value: string): void {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="检查次数" width="110" align="right">
-          <template #default="{ row }">{{ treeStore.statOf(row.id).surveyCount }} 次</template>
+        <el-table-column label="检查次数" width="120" align="right">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <span>{{ treeStore.statOf(row.id).surveyCount }} 次</span>
+              <span v-if="treeStore.statOf(row.id).retestCount > 0" class="cell-sub">
+                含复测 {{ treeStore.statOf(row.id).retestCount }} 条
+              </span>
+            </div>
+          </template>
         </el-table-column>
         <el-table-column label="最新长势" width="170">
           <template #default="{ row }">
@@ -227,16 +234,26 @@ function handleFilterChange(key: string, value: string): void {
             />
           </template>
         </el-table-column>
-        <el-table-column label="倾斜度" width="130">
+        <el-table-column label="倾斜度" width="150">
           <template #default="{ row }">
-            <span v-if="treeStore.statOf(row.id).latestSurvey === null" class="cell-sub">未检查</span>
-            <el-tag
-              v-else
-              :type="treeStore.statOf(row.id).lean === 'danger' ? 'danger' : treeStore.statOf(row.id).lean === 'watch' ? 'warning' : 'success'"
-              size="small"
-            >
-              {{ treeStore.statOf(row.id).latestSurvey?.leanDeg }}° {{ treeStore.statOf(row.id).leanLabel }}
-            </el-tag>
+            <span v-if="treeStore.statOf(row.id).latestPoint === null" class="cell-sub">未检查</span>
+            <div v-else class="cell-stack">
+              <el-tag
+                :type="treeStore.statOf(row.id).lean === 'danger' ? 'danger' : treeStore.statOf(row.id).lean === 'watch' ? 'warning' : 'success'"
+                size="small"
+              >
+                {{ treeStore.statOf(row.id).latestPoint?.leanDeg }}° {{ treeStore.statOf(row.id).leanLabel }}
+              </el-tag>
+              <el-tag
+                v-if="treeStore.statOf(row.id).latestPoint?.retested"
+                size="small"
+                type="warning"
+                effect="plain"
+                class="cell-retest-tag"
+              >
+                复测 {{ treeStore.statOf(row.id).latestPoint?.retestDate }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="待办措施" width="110" align="right">
@@ -351,6 +368,10 @@ function handleFilterChange(key: string, value: string): void {
 .cell-sub {
   font-size: 12px;
   color: #8c8479;
+}
+
+.cell-retest-tag {
+  width: fit-content;
 }
 
 .cell-warn {

@@ -42,7 +42,7 @@ docker compose up -d --build       # 改完代码后重新构建
 | 构建 | Vite 6 | 开发端口与宿主端口一致（22815） |
 | 路由 | Vue Router 4 | `createWebHistory` + 路由懒加载 |
 | 状态管理 | Pinia 2 | setup store，跨页状态集中在 store，页面只读 store |
-| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbheritagetree`，含 v1 → v2 升级迁移 |
+| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbheritagetree`，含 v1 → v3 升级迁移 |
 | 容器 | node:20-alpine → nginx:alpine | 多阶段构建，`chmod -R a+rX` 规避静态资源 403 |
 
 ---
@@ -85,7 +85,7 @@ sologsb101-1015/
 | 路由 | 页面文件 | 功能 |
 | --- | --- | --- |
 | `/trees` | `pages/TreeList.vue` | 古树一树一档：新建/编辑/级联删除、按保护级别与树种筛选、回显检查次数与最新长势等级 |
-| `/trees/:id/surveys` | `pages/TreeSurvey.vue` | 树体与立地检查：录树高/胸径/冠幅/倾斜/空洞并对比上次、年化生长量、古树历史时间线 |
+| `/trees/:id/surveys` | `pages/TreeSurvey.vue` | 树体与立地检查：录树高/胸径/冠幅/倾斜/空洞并对比上次、年化生长量、古树历史时间线；首测不准可补记复测（复测值生效、不新增到场检查） |
 | `/measures` | `pages/MeasureBoard.vue` | 复壮措施台账：按类型与实施状态筛选、行内草稿、批量改状态，完成即回写最近复壮日期 |
 | `/supports` | `pages/SupportBoard.vue` | 支撑加固与避雷件登记：超周期未检查自动高亮 + 顶部提醒 + 一键登记本次检查 |
 | `/reviews` | `pages/ReviewView.vue` | 长势复评与结构版本：衰弱/濒危强制填写后续措施、历史时间线、JSON 导入导出 |
@@ -100,12 +100,14 @@ sologsb101-1015/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbheritagetree`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
   * `surveys` 增加 `[treeId+date]` 复合索引、`measures` 增加 `operator` 索引、`supports` 增加 `lastCheckDate` 索引、`reviews` 增加 `trend` 索引；
   * 回填 `revision` / `createdAt` / `updatedAt`；
   * 为 `trees` 补齐 `lastMeasureDate`（最近复壮日期）回写字段；
   * 为 `reviews` 补齐 `followUp`（后续措施）字段；
   * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值。
+* `version(3)` 为树体检查增加「补记复测」（`surveys.retest`）字段，历史检查迁移为 `retest = null`（继续采用首测值）；
+  导入旧版 v2 存档时同样自动补齐该字段。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -148,6 +150,11 @@ npm run preview      # 预览 dist 产物
 
 ## 七、核心业务规则
 
+* **补记复测**：每条树体检查可补记一条复测（复测日期、树高、胸径、冠幅、倾斜度、空洞数），用于更正首测偏差。
+  复测**不算新到场检查**（到场检查次数不增加，顶部导航徽标也不增加），生长量时间轴上的**日期不挪到复测日**，
+  仍用原检查日期；保存后该株树的**年生长量、倾斜 / 空洞风险、档案列表与养护总览 CSV 导出一律改用复测值**，
+  页面以「复测值 / 原测值」并列、复测日期标签与顶部说明呈现。复测可编辑、可撤销（撤销后恢复首测值）；
+  复测日期必须**严格晚于原检查日期且不晚于今天**（日期选择器与表单校验双重限制）。
 * **倾斜安全阈值**：< 5° 正常；5°–10° 需关注；> 10° 超限（`src/utils/dimension.ts`）。
 * **空洞风险**：1–2 处需关注，≥ 3 处判定为高风险，建议立即安排树洞修补与防腐处理。
 * **生长量年化**：由最近两次检查的差值按实际天数折算为「每年」增量，间隔不足 30 天时退回直接差值。

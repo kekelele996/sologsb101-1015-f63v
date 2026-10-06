@@ -5,6 +5,7 @@
  * - 倾斜角与空洞安全阈值判定
  * - 加固件检查周期超期判定
  */
+import type { SiteNote, Survey } from '../types/survey'
 import type { Vigor } from '../types/review'
 import { today } from './id'
 
@@ -45,6 +46,59 @@ export function annualGrowth(previous: number, current: number, previousDate: st
   const days = daysBetween(previousDate, currentDate)
   if (days < 30) return round2(delta)
   return round2((delta / days) * 365)
+}
+
+/* -------------------------------- 复测 -------------------------------- */
+
+/**
+ * 树体检查的「生效测量点」：
+ * 补记复测后数值以复测为准，但生长量时间轴上的日期仍取原检查日期
+ * （复测是对当场检查的测量更正，不算新到场检查，不挪动年份）。
+ */
+export interface SurveyPoint {
+  surveyId: string
+  /** 时间轴上的日期：始终取原检查日期 */
+  date: string
+  /** 是否为复测值 */
+  retested: boolean
+  /** 复测日期（未复测为 null），仅用于留痕展示 */
+  retestDate: string | null
+  heightM: number
+  dbhCm: number
+  crownM: number
+  leanDeg: number
+  hollowCount: number
+  siteNote: SiteNote
+}
+
+/** 把一条检查归一成生效测量点（有复测则采用复测值） */
+export function surveyPoint(row: Survey): SurveyPoint {
+  const retest = row.retest ?? null
+  return {
+    surveyId: row.id,
+    date: row.date,
+    retested: retest !== null,
+    retestDate: retest === null ? null : retest.retestDate,
+    heightM: retest === null ? row.heightM : retest.heightM,
+    dbhCm: retest === null ? row.dbhCm : retest.dbhCm,
+    crownM: retest === null ? row.crownM : retest.crownM,
+    leanDeg: retest === null ? row.leanDeg : retest.leanDeg,
+    hollowCount: retest === null ? row.hollowCount : retest.hollowCount,
+    siteNote: row.siteNote,
+  }
+}
+
+/** 按检查日期升序（同日期再按创建时间）排列并归一生效测量点 */
+export function sortSurveyPoints(rows: Survey[]): SurveyPoint[] {
+  return [...rows]
+    .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
+    .map(surveyPoint)
+}
+
+/** 补记复测的日期是否合法：必须严格晚于原检查日期，且不晚于参考日期（默认今天） */
+export function isValidRetestDate(originalDate: string, retestDate: string, reference = today()): boolean {
+  if (retestDate === '' || originalDate === '') return false
+  return daysBetween(originalDate, retestDate) >= 1 && retestDate <= reference
 }
 
 /** 倾斜安全等级 */

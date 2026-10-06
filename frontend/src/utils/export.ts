@@ -10,7 +10,7 @@ import type { Measure } from '../types/measure'
 import type { Support } from '../types/support'
 import type { Review } from '../types/review'
 import { stampSuffix } from './id'
-import { isSupportOverdue, overdueDays } from './dimension'
+import { isSupportOverdue, overdueDays, sortSurveyPoints } from './dimension'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -90,8 +90,10 @@ export function buildTreeCsv(
     '树龄(年)',
     '位置',
     '管护单位',
-    '检查次数',
+    '到场检查次数',
+    '补记复测数',
     '最近检查日期',
+    '最近复测日期',
     '树高(m)',
     '胸径(cm)',
     '冠幅(m)',
@@ -109,8 +111,9 @@ export function buildTreeCsv(
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   trees.forEach((tree) => {
-    const treeSurveys = surveys.filter((row) => row.treeId === tree.id).sort((a, b) => a.date.localeCompare(b.date))
-    const latest = treeSurveys.length > 0 ? treeSurveys[treeSurveys.length - 1] : null
+    const points = sortSurveyPoints(surveys.filter((row) => row.treeId === tree.id))
+    const retestCount = points.filter((point) => point.retested).length
+    const latest = points.length > 0 ? points[points.length - 1] : null
     const treeMeasures = measures.filter((row) => row.treeId === tree.id)
     const treeSupports = supports.filter((row) => row.treeId === tree.id)
     const treeReviews = reviews.filter((row) => row.treeId === tree.id).sort((a, b) => a.date.localeCompare(b.date))
@@ -124,8 +127,10 @@ export function buildTreeCsv(
         tree.ageYears,
         tree.location,
         tree.owner,
-        treeSurveys.length,
+        points.length,
+        retestCount,
         latest === null ? '—' : latest.date,
+        latest !== null && latest.retested ? (latest.retestDate ?? '—') : '—',
         latest === null ? 0 : latest.heightM,
         latest === null ? 0 : latest.dbhCm,
         latest === null ? 0 : latest.crownM,

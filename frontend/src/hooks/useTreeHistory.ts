@@ -40,13 +40,20 @@ export function buildHistory(
 ): HistoryItem[] {
   const items: HistoryItem[] = []
   surveys.forEach((row) => {
+    const retest = row.retest ?? null
     items.push({
       key: `survey-${row.id}`,
       kind: 'survey',
       date: row.date,
-      title: `树体检查 · 树高 ${row.heightM} m / 胸径 ${row.dbhCm} cm`,
-      detail: `冠幅 ${row.crownM} m，倾斜 ${row.leanDeg}°，空洞 ${row.hollowCount} 处，立地：${row.siteNote}`,
-      badge: row.siteNote,
+      title:
+        retest === null
+          ? `树体检查 · 树高 ${row.heightM} m / 胸径 ${row.dbhCm} cm`
+          : `树体检查（复测值）· 树高 ${retest.heightM} m / 胸径 ${retest.dbhCm} cm`,
+      detail:
+        retest === null
+          ? `冠幅 ${row.crownM} m，倾斜 ${row.leanDeg}°，空洞 ${row.hollowCount} 处，立地：${row.siteNote}`
+          : `${retest.retestDate} 补记复测（不另算到场检查，日期仍按 ${row.date}）：冠幅 ${retest.crownM} m，倾斜 ${retest.leanDeg}°，空洞 ${retest.hollowCount} 处，立地：${row.siteNote}；首测 树高 ${row.heightM} m / 胸径 ${row.dbhCm} cm`,
+      badge: retest === null ? row.siteNote : `${row.siteNote} · 已复测`,
     })
   })
   measures.forEach((row) => {
